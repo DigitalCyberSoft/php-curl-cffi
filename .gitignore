@@ -1,0 +1,40 @@
+# Build artifacts
+*.lo
+*.la
+*.o
+*.so
+*.dep
+.libs/
+modules/
+autom4te.cache/
+config.h
+config.h.in
+config.h.in~
+config.log
+config.nice
+config.status
+configure
+configure~
+libtool
+Makefile
+Makefile.fragments
+Makefile.objects
+build/
+
+# Test artifacts
+tests/*.diff
+tests/*.out
+tests/*.exp
+tests/*.log
+tests/*.sh
+tests/*.php
+tests/php-compat/*.diff
+tests/php-compat/*.out
+tests/php-compat/*.exp
+tests/php-compat/*.log
+tests/php-compat/*.sh
+tests/php-compat/*.php
+
+# IDE
+.vscode/
+.idea/

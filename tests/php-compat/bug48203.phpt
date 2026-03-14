@@ -1,0 +1,31 @@
+--TEST--
+Bug #48203 (Crash when CURLOPT_STDERR is set to regular file)
+--EXTENSIONS--
+curl_impersonate
+--FILE--
+<?php
+include 'server.inc';
+$fp = fopen(__DIR__ . '/bug48203.tmp', 'w');
+
+$ch = curl_cffi_init();
+
+curl_cffi_setopt($ch, CURLOPT_VERBOSE, 1);
+curl_cffi_setopt($ch, CURLOPT_STDERR, $fp);
+curl_cffi_setopt($ch, CURLOPT_URL, curl_cli_server_start());
+
+fclose($fp); // <-- premature close of $fp caused a crash!
+
+curl_cffi_exec($ch);
+curl_cffi_close($ch);
+
+echo "Ok\n";
+
+?>
+--CLEAN--
+<?php @unlink(__DIR__ . '/bug48203.tmp'); ?>
+--EXPECTF--
+Warning: curl_cffi_exec(): CURLOPT_STDERR resource has gone away, resetting to stderr in %s on line %d
+%A
+Hello World!
+Hello World!%A
+Ok

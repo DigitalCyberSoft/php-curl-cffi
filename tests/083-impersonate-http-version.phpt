@@ -1,5 +1,5 @@
 --TEST--
-Impersonate defaults to HTTP/2+ for HTTPS connections
+Impersonate HTTP version defaults to HTTP/2 and can be overridden
 --EXTENSIONS--
 curl_impersonate
 --SKIPIF--
@@ -13,26 +13,30 @@ if (curl_cffi_errno($ch) !== 0) die("skip: cannot reach tls.browserleaks.com");
 ?>
 --FILE--
 <?php
-// Chrome impersonation should negotiate HTTP/2+ via ALPN
+// CURLINFO_HTTP_VERSION returns CURL_HTTP_VERSION_* constants:
+// 2 = HTTP/1.1, 3 = HTTP/2, 4 = HTTP/2TLS
+
+// Default: impersonation should use HTTP/2
 $ch = curl_cffi_init("https://tls.browserleaks.com/json");
 curl_cffi_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 curl_cffi_setopt($ch, CURLOPT_TIMEOUT, 15);
 curl_cffi_impersonate($ch, 'chrome120');
 $result = curl_cffi_exec($ch);
 $info = curl_cffi_getinfo($ch, CURLINFO_HTTP_VERSION);
-echo "Chrome HTTP version: " . ($info >= 2 ? "HTTP/2+" : "HTTP/1.x") . "\n";
+echo "Default: " . ($info >= 3 ? "HTTP/2+" : "HTTP/1.x") . "\n";
 curl_cffi_close($ch);
 
-// Safari should also use HTTP/2+
+// Force HTTP/1.1 after impersonate
 $ch = curl_cffi_init("https://tls.browserleaks.com/json");
 curl_cffi_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 curl_cffi_setopt($ch, CURLOPT_TIMEOUT, 15);
-curl_cffi_impersonate($ch, 'safari18_0');
+curl_cffi_impersonate($ch, 'chrome120');
+curl_cffi_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 $result = curl_cffi_exec($ch);
 $info = curl_cffi_getinfo($ch, CURLINFO_HTTP_VERSION);
-echo "Safari HTTP version: " . ($info >= 2 ? "HTTP/2+" : "HTTP/1.x") . "\n";
+echo "Forced HTTP/1.1: " . ($info <= 2 ? "HTTP/1.x" : "HTTP/2+") . "\n";
 curl_cffi_close($ch);
 ?>
 --EXPECT--
-Chrome HTTP version: HTTP/2+
-Safari HTTP version: HTTP/2+
+Default: HTTP/2+
+Forced HTTP/1.1: HTTP/1.x

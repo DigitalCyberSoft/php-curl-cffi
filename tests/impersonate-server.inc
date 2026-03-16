@@ -393,6 +393,7 @@ function get_expected_extension_ids(array $extensions): array {
         'key_share' => 51,
         'renegotiation_info' => 65281,
         'application_settings' => 17513,
+        'application_settings_new' => 17613,
         'encrypted_client_hello' => 65037,
         'extensionencryptedclienthello' => 65037,
         // Less common

@@ -42,8 +42,9 @@ tests/bin/
 .vscode/
 .idea/
 
-# TLS signatures
+# TLS signatures (converted from YAML, except targets.json which is hand-maintained)
 tests/signatures/*.json
+!tests/signatures/targets.json
 
 # Build dependencies and artifacts
 curl-impersonate/

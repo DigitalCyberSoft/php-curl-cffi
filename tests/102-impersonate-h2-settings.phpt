@@ -100,12 +100,20 @@ PASS chrome120
 PASS chrome123
 PASS chrome124
 PASS chrome131
+PASS chrome136
+PASS chrome142
 PASS edge99
 PASS edge101
 PASS safari15_3
 PASS safari15_5
 PASS safari17_0
+PASS safari17_2_ios
 PASS safari18_0
+PASS safari18_0_ios
+PASS safari18_4
+PASS firefox133
+PASS firefox135
+PASS firefox144
 
-Results: 18 passed, 0 failed out of 18 targets
+Results: 26 passed, 0 failed out of 26 targets
 ALL TESTS PASSED

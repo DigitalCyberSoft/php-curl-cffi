@@ -99,27 +99,62 @@ _orig_server_hello = _TlsCtx._server_handle_hello
 def _patched_server_hello(self, input_buf, initial_buf, handshake_buf, onertt_buf):
     try:
         pos = input_buf.tell()
-        raw = input_buf.data_slice(pos, input_buf.capacity)
-        hello = _pull_ch(_AioBuf(data=bytes(raw)))
-        _h3_tls["latest"] = _aioquic_hello_to_dict(hello)
+        raw = bytes(input_buf.data_slice(pos, input_buf.capacity))
+        hello = _pull_ch(_AioBuf(data=raw))
+        _h3_tls["latest"] = _aioquic_hello_to_dict(hello, raw_bytes=raw)
     except Exception as e:
         print(f"H3 TLS capture error: {e}", file=sys.stderr, flush=True)
     return _orig_server_hello(self, input_buf, initial_buf, handshake_buf, onertt_buf)
 
 
-def _aioquic_hello_to_dict(hello):
+def _parse_tls_extension_order(raw_bytes):
+    """Parse TLS extension IDs in wire order from raw ClientHello bytes.
+
+    aioquic's pull_client_hello consumes extensions into dedicated fields,
+    losing the original order. This parses just the extension type IDs
+    from the raw handshake message.
+    """
+    if len(raw_bytes) < 38 or raw_bytes[0] != 1:
+        return []
+
+    pos = 4 + 2 + 32  # type(1)+len(3) + version(2) + random(32)
+    if pos >= len(raw_bytes):
+        return []
+    sid_len = raw_bytes[pos]; pos += 1 + sid_len
+
+    if pos + 2 > len(raw_bytes):
+        return []
+    cs_len = struct.unpack("!H", raw_bytes[pos:pos + 2])[0]; pos += 2 + cs_len
+
+    if pos >= len(raw_bytes):
+        return []
+    comp_len = raw_bytes[pos]; pos += 1 + comp_len
+
+    if pos + 2 > len(raw_bytes):
+        return []
+    ext_len = struct.unpack("!H", raw_bytes[pos:pos + 2])[0]; pos += 2
+    ext_end = pos + ext_len
+
+    ext_ids = []
+    while pos + 4 <= ext_end and pos + 4 <= len(raw_bytes):
+        etype = struct.unpack("!H", raw_bytes[pos:pos + 2])[0]
+        elen = struct.unpack("!H", raw_bytes[pos + 2:pos + 4])[0]
+        ext_ids.append(_gv(etype))
+        pos += 4 + elen
+
+    return ext_ids
+
+
+def _aioquic_hello_to_dict(hello, raw_bytes=None):
     """Convert aioquic ClientHello dataclass to capture dict."""
-    # Build ordered extension list from the known fields + other_extensions
-    # aioquic parses some extensions into dedicated fields and puts the rest
-    # in other_extensions. We reconstruct the full list from other_extensions
-    # (which preserves wire order for unparsed extensions) plus the parsed ones.
     other_ext_ids = []
     for e in hello.other_extensions:
         eid = e[0] if isinstance(e, tuple) else e.extension_type
         other_ext_ids.append({"type": _ext_name(eid), "id": eid})
 
-    return {
+    result = {
         "cipher_suites": [_gv(c) for c in hello.cipher_suites],
+        "extensions": [],  # will be filled from raw parse
         "supported_groups": [_gv(g) for g in (hello.supported_groups or [])],
         "signature_algorithms": hello.signature_algorithms or [],
         "supported_versions": [_gv(v) for v in (hello.supported_versions or [])],
@@ -133,10 +168,47 @@ def _aioquic_hello_to_dict(hello):
         "other_extensions": other_ext_ids,
     }
 
+    # Full extension order from raw bytes
+    if raw_bytes:
+        result["extensions"] = _parse_tls_extension_order(raw_bytes)
+
+    return result
+
 
 _TlsCtx._server_handle_hello = _patched_server_hello
+
+# Patch _parse_transport_parameters to capture QUIC transport params
+from aioquic.quic.connection import QuicConnection as _QuicConn
+from aioquic.quic.packet import pull_quic_transport_parameters as _pull_tp
+
+_h3_transport = {}
+_orig_parse_tp = _QuicConn._parse_transport_parameters
+
+
+def _patched_parse_tp(self, data):
+    try:
+        params = _pull_tp(_AioBuf(data=data))
+        _h3_transport["latest"] = {}
+        for field in [
+            "initial_max_data", "initial_max_stream_data_bidi_local",
+            "initial_max_stream_data_bidi_remote", "initial_max_stream_data_uni",
+            "initial_max_streams_bidi", "initial_max_streams_uni",
+            "max_idle_timeout", "max_udp_payload_size",
+            "ack_delay_exponent", "max_ack_delay",
+            "active_connection_id_limit", "disable_active_migration",
+            "max_datagram_frame_size",
+        ]:
+            val = getattr(params, field, None)
+            if val is not None:
+                _h3_transport["latest"][field] = val
+    except Exception as e:
+        print(f"QUIC transport param capture error: {e}", file=sys.stderr, flush=True)
+    return _orig_parse_tp(self, data)
+
+
+_QuicConn._parse_transport_parameters = _patched_parse_tp
 # ================================================================
-# End early patch
+# End early patches
 # ================================================================
 
 from aioquic.asyncio import serve as quic_serve
@@ -394,9 +466,41 @@ class H3ServerProtocol(QuicConnectionProtocol):
                     ua = v
 
         result = _log_request("HTTP/3", pseudo, headers, ua)
+
+        # TLS ClientHello
         tls_info = _h3_tls.pop("latest", None)
         if tls_info:
             result["tls"] = tls_info
+
+        # QUIC transport parameters
+        tp = _h3_transport.pop("latest", None)
+        if tp:
+            result["quic_transport_params"] = tp
+
+        # H3 SETTINGS (peer's received settings)
+        if self._h3 and self._h3.received_settings:
+            h3s = {}
+            H3_SETTING_NAMES = {
+                0x01: "QPACK_MAX_TABLE_CAPACITY",
+                0x06: "MAX_FIELD_SECTION_SIZE",
+                0x07: "QPACK_BLOCKED_STREAMS",
+                0x08: "ENABLE_CONNECT_PROTOCOL",
+                0x09: "H3_DATAGRAM",
+                0x33: "ENABLE_WEBTRANSPORT",
+            }
+            for k, v in self._h3.received_settings.items():
+                name = H3_SETTING_NAMES.get(k, k)
+                h3s[name] = v
+            # Also build the fingerprint string format: "key:value;key:value"
+            parts = []
+            for k, v in self._h3.received_settings.items():
+                if k in GREASE:
+                    parts.append("GREASE")
+                else:
+                    parts.append(f"{k}:{v}")
+            result["h3_settings"] = h3s
+            result["h3_settings_text"] = ";".join(parts)
+
         print(json.dumps(result), flush=True)
 
         page = _render_page("HTTP/3", pseudo, headers, result).encode()

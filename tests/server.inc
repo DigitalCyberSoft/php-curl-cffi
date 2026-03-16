@@ -4,7 +4,7 @@ function curl_cli_server_start() {
     $php_executable = getenv('TEST_PHP_EXECUTABLE') ?: PHP_BINARY;
     $doc_root = __DIR__;
     $router = "responder/get.inc";
-    $cmd = [$php_executable, '-t', $doc_root, '-n', '-S', 'localhost:0', $router];
+    $cmd = [$php_executable, '-t', $doc_root, '-S', 'localhost:0', $router];
     $descriptorspec = array(
         0 => STDIN,
         1 => STDOUT,

@@ -14,15 +14,18 @@ Requirements:
   - CA cert pair at /tmp/ca.crt + /tmp/ca.key (generated if missing)
   - Server cert at /tmp/srv.crt + /tmp/srv.key (generated if missing)
 
+Requirements:
+  - xvfb-run (xorg-x11-server-Xvfb package)
+  - Go TLS server built: tests/bin/tls-server
+  - nghttpd (nghttp2 package)
+  - For Firefox: certutil (nss-tools package)
+
 Usage:
     # Capture all installed browsers
     python3 tests/tools/capture-signature.py
 
     # Capture specific browser
     python3 tests/tools/capture-signature.py --browser chrome
-
-    # Headless mode (less accurate UA, but no display needed)
-    python3 tests/tools/capture-signature.py --headless
 
     # Custom output directory
     python3 tests/tools/capture-signature.py --output-dir /tmp/signatures
@@ -63,20 +66,20 @@ BROWSERS = {
         "bin": "google-chrome",
         "name": "chrome",
         "permute": True,
-        "chromium": True,
+        "chrome_based": True,
     },
     "edge": {
         "bin": "microsoft-edge",
         "alt_bins": ["microsoft-edge-stable"],
         "name": "edge",
         "permute": True,
-        "chromium": True,
+        "chrome_based": True,
     },
     "firefox": {
         "bin": "firefox",
         "name": "firefox",
         "permute": False,
-        "chromium": False,
+        "chrome_based": False,
     },
 }
 
@@ -164,28 +167,36 @@ def start_nghttpd(port):
     return proc, log_file.name
 
 
-def run_browser(binary, url, info, headless=False, profile_dir=None, timeout=8):
-    """Launch browser to visit a URL, wait, then kill it."""
-    cmd = [binary]
+def run_browser(binary, url, info, profile_dir=None, timeout=8):
+    """Launch browser in Xvfb virtual display, wait, then kill it.
 
-    if info["chromium"]:
-        if headless:
-            cmd += ["--headless=new", "--disable-gpu"]
-        cmd += [
+    Always runs headed (not --headless) for accurate fingerprints,
+    but inside Xvfb so no real display is needed and no interference
+    with the user's running browsers.
+    """
+    browser_cmd = [binary]
+
+    if info["chrome_based"]:
+        browser_cmd += [
             "--no-sandbox", "--ignore-certificate-errors",
             "--disable-extensions", "--disable-background-networking",
             "--disable-sync", "--no-first-run", "--no-default-browser-check",
         ]
         if profile_dir:
-            cmd += [f"--user-data-dir={profile_dir}"]
+            browser_cmd += [f"--user-data-dir={profile_dir}"]
     else:
         # Firefox
-        if headless:
-            cmd += ["--headless"]
         if profile_dir:
-            cmd += ["--profile", profile_dir, "--no-remote"]
+            browser_cmd += ["--profile", profile_dir, "--no-remote"]
 
-    cmd.append(url)
+    browser_cmd.append(url)
+
+    # Wrap in xvfb-run for a clean virtual display per invocation
+    cmd = [
+        "xvfb-run", "--auto-servernum",
+        "--server-args=-screen 0 1920x1080x24",
+    ] + browser_cmd
+
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(timeout)
 
@@ -332,7 +343,7 @@ def build_signature(name, version, tls_data, h2_data, permute):
     return sig
 
 
-def capture_browser(browser_key, info, headless=False, output_dir=None, h2_port_base=19990):
+def capture_browser(browser_key, info, output_dir=None, h2_port_base=19990):
     """Capture TLS and HTTP/2 signatures for one browser."""
     binary = find_binary(info)
     if not binary:
@@ -341,13 +352,13 @@ def capture_browser(browser_key, info, headless=False, output_dir=None, h2_port_
 
     version = get_version(binary)
     print(f"\n{'=' * 60}")
-    print(f"  {info['name']} {version} ({'headless' if headless else 'non-headless'})")
+    print(f"  {info['name']} {version} (Xvfb)")
     print(f"{'=' * 60}")
 
     profile_dir = tempfile.mkdtemp(prefix=f"sig_{browser_key}_")
 
     # Firefox needs CA cert in NSS database
-    if not info["chromium"]:
+    if not info["chrome_based"]:
         if shutil.which("certutil"):
             subprocess.run(
                 ["certutil", "-N", "-d", f"sql:{profile_dir}", "--empty-password"],
@@ -363,12 +374,12 @@ def capture_browser(browser_key, info, headless=False, output_dir=None, h2_port_
 
     # --- TLS capture ---
     print("  Capturing TLS ClientHello...")
-    use_ca = not info["chromium"]  # Firefox needs CA cert, Chromium ignores cert errors
+    use_ca = not info["chrome_based"]  # Firefox needs CA cert, Chrome ignores cert errors
     tls_proc, tls_port, tls_err, tls_out = start_tls_server(use_ca_cert=use_ca)
 
-    host = "localhost" if not info["chromium"] else "127.0.0.1"
+    host = "localhost" if not info["chrome_based"] else "127.0.0.1"
     run_browser(binary, f"https://{host}:{tls_port}/", info,
-                headless=headless, profile_dir=profile_dir, timeout=8)
+                profile_dir=profile_dir, timeout=8)
 
     tls_proc.terminate()
     tls_proc.wait()
@@ -396,7 +407,7 @@ def capture_browser(browser_key, info, headless=False, output_dir=None, h2_port_
     h2_proc, h2_log = start_nghttpd(h2_port)
 
     run_browser(binary, f"https://{host}:{h2_port}/", info,
-                headless=headless, profile_dir=profile_dir, timeout=8)
+                profile_dir=profile_dir, timeout=8)
 
     time.sleep(1)
     h2_proc.terminate()
@@ -446,10 +457,6 @@ def main():
         help="Capture specific browser (default: all installed)",
     )
     parser.add_argument(
-        "--headless", action="store_true",
-        help="Run browsers in headless mode (less accurate UA string)",
-    )
-    parser.add_argument(
         "--output-dir", "-o",
         help="Output directory for YAML files (default: curl-impersonate/tests/signatures/)",
     )
@@ -465,21 +472,9 @@ def main():
         print("ERROR: nghttpd not found. Install nghttp2 package.")
         sys.exit(1)
 
-    # Check display for non-headless
-    if not args.headless:
-        display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-        if not display:
-            # Try to detect X11
-            try:
-                subprocess.run(["xdpyinfo"], capture_output=True, timeout=3)
-                os.environ["DISPLAY"] = ":0"
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                print("WARNING: No display detected. Use --headless or set DISPLAY.")
-                print("  Falling back to headless mode.")
-                args.headless = True
-
-    if not args.headless and "DISPLAY" not in os.environ:
-        os.environ["DISPLAY"] = ":0"
+    if not shutil.which("xvfb-run"):
+        print("ERROR: xvfb-run not found. Install xorg-x11-server-Xvfb.")
+        sys.exit(1)
 
     ensure_certs()
 
@@ -492,7 +487,6 @@ def main():
     for key, info in browsers_to_capture.items():
         sig = capture_browser(
             key, info,
-            headless=args.headless,
             output_dir=args.output_dir,
         )
         if sig:

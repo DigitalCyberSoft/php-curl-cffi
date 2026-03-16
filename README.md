@@ -8,42 +8,130 @@ When making HTTP requests, many anti-bot systems inspect the TLS Client Hello an
 
 - PHP 8.0 or later
 - libcurl development headers (`libcurl-devel` / `libcurl4-openssl-dev`)
-- `libcurl-impersonate.a` static library (see [Building libcurl-impersonate](#building-libcurl-impersonate))
-- Standard build tools: `gcc`, `make`, `autoconf`, `phpize`
+- Standard build tools: `gcc`, `g++`, `make`, `autoconf`, `phpize`
+
+### Build Dependencies
+
+**Fedora/RHEL:**
+```bash
+dnf install gcc gcc-c++ make cmake ninja-build golang autoconf automake libtool \
+  python3 unzip php-devel libcurl-devel zlib-devel brotli-devel \
+  libnghttp2-devel libzstd-devel libidn2-devel
+```
+
+**Debian/Ubuntu:**
+```bash
+apt install gcc g++ make cmake ninja-build golang autoconf automake libtool \
+  python3 unzip php-dev libcurl4-openssl-dev zlib1g-dev libbrotli-dev \
+  libnghttp2-dev libzstd-dev libidn2-dev
+```
 
 ## Installation
 
-### 1. Build libcurl-impersonate
-
-Follow the [curl-impersonate build instructions](https://github.com/lwthiker/curl-impersonate) to produce `libcurl-impersonate.a`. Place it in `/usr/local/lib/` or note the path for step 3.
-
-### 2. Build the extension
+### Install from COPR (Fedora, recommended)
 
 ```bash
-cd php-curl-impersonate
+dnf copr enable reversejames/php-curl-cffi
+dnf install php-curl_impersonate
+```
+
+Packages are automatically rebuilt when PHP is updated. Available for Fedora 42+, x86_64 and aarch64.
+
+### Install from .deb (Debian/Ubuntu)
+
+Download the `.deb` package from the [latest release](https://github.com/DigitalCyberSoft/php-curl-cffi/releases) and install:
+
+```bash
+dpkg -i php-curl-impersonate_*.deb
+```
+
+### Build from Source
+
+The extension statically links [libcurl-impersonate](https://github.com/lexiforest/curl-impersonate) which bundles BoringSSL, ngtcp2, and nghttp3. These are built from source automatically.
+
+#### Step 1: Build libcurl-impersonate
+
+```bash
+git clone --depth=1 https://github.com/lexiforest/curl-impersonate.git
+cd curl-impersonate
+
+# Download pinned dependency sources
+BSSL_COMMIT=$(sed -n 's/^BORING_SSL_COMMIT := //p' Makefile.in)
+CURL_VER=$(sed -n 's/^CURL_VERSION := //p' Makefile.in)
+NGTCP2_VER=$(sed -n 's/^NGTCP2_VERSION := //p' Makefile.in)
+NGHTTP3_VER=$(sed -n 's/^NGHTTP3_VERSION := //p' Makefile.in)
+
+curl -fL -o "boringssl-$BSSL_COMMIT.zip" \
+  "https://github.com/google/boringssl/archive/$BSSL_COMMIT.zip"
+curl -fL -o "$CURL_VER.tar.gz" \
+  "https://github.com/curl/curl/archive/$CURL_VER.tar.gz"
+curl -fL -o "ngtcp2-$NGTCP2_VER.tar.bz2" \
+  "https://github.com/ngtcp2/ngtcp2/releases/download/v$NGTCP2_VER/ngtcp2-$NGTCP2_VER.tar.bz2"
+curl -fL -o "nghttp3-$NGHTTP3_VER.tar.bz2" \
+  "https://github.com/ngtcp2/nghttp3/releases/download/v$NGHTTP3_VER/nghttp3-$NGHTTP3_VER.tar.bz2"
+
+# Configure and build
+mkdir -p build && cd build
+cp ../*.tar.gz ../*.tar.bz2 ../*.zip . 2>/dev/null || :
+../configure --prefix=$(pwd)/dist
+
+# Use system libs for brotli, nghttp2, zstd, zlib, idn2
+sed -i 's|^chrome_libs := .*|chrome_libs := $(boringssl_static_libs) $(ngtcp2_static_libs) $(nghttp3_static_libs)|' Makefile
+sed -i 's|--with-nghttp2=$(nghttp2_install_dir)|--with-nghttp2|' Makefile
+sed -i 's|--with-brotli=$(brotli_install_dir)|--with-brotli|' Makefile
+sed -i 's|--with-zstd=$(zstd_install_dir)|--with-zstd|' Makefile
+sed -i 's|--with-zlib=$(zlib_install_dir)|--with-zlib|' Makefile
+sed -i 's|--with-libidn2=$(libidn2_install_dir)|--with-libidn2|' Makefile
+
+export CFLAGS="$CFLAGS -fPIC"
+export CXXFLAGS="$CXXFLAGS -fPIC"
+make build
+make install
+cd ../..
+```
+
+#### Step 2: Create combined static archive
+
+The static libraries have circular dependencies that require either LTO or a combined archive. For local builds, merge them:
+
+```bash
+CURL_IMP_DIR=$(pwd)/curl-impersonate
+TMPDIR=$(mktemp -d) && pushd "$TMPDIR"
+
+for lib in \
+  "$CURL_IMP_DIR/build/dist/lib/libcurl-impersonate.a" \
+  $(find "$CURL_IMP_DIR/build" -path '*/installed/lib/libngtcp2_crypto_boringssl.a') \
+  $(find "$CURL_IMP_DIR/build" -path '*/installed/lib/libngtcp2.a' -not -name '*crypto*') \
+  $(find "$CURL_IMP_DIR/build" -path '*/installed/lib/libnghttp3.a') \
+  $(find "$CURL_IMP_DIR/build" -path '*/boringssl*/lib/libssl.a') \
+  $(find "$CURL_IMP_DIR/build" -path '*/boringssl*/lib/libcrypto.a'); do
+  dir=$(basename "$lib" .a) && mkdir -p "$dir" && cd "$dir" && ar x "$lib" && cd ..
+done
+
+find . -name '*.o' | xargs ar rcs combined.a
+popd && mv "$TMPDIR/combined.a" libcurl-impersonate-combined.a && rm -rf "$TMPDIR"
+```
+
+#### Step 3: Build the PHP extension
+
+```bash
 phpize
-./configure --with-curl-impersonate=/path/to/libcurl-impersonate.a
-make
+./configure --with-curl-impersonate=$(pwd)/libcurl-impersonate-combined.a
+
+# Replace link line with combined archive and system libs
+sed -i "s|^CURL_IMPERSONATE_SHARED_LIBADD = .*|CURL_IMPERSONATE_SHARED_LIBADD = \
+  $(pwd)/libcurl-impersonate-combined.a \
+  -lnghttp2 -lbrotlidec -lbrotlicommon -lzstd -lidn2 \
+  -lpthread -lz -ldl -lm -lstdc++|" Makefile
+
+make -j$(nproc)
 sudo make install
 ```
 
-If `libcurl-impersonate.a` is at the default location (`/usr/local/lib/libcurl-impersonate.a`), you can omit the path:
+#### Step 4: Enable and verify
 
 ```bash
-./configure --with-curl-impersonate
-```
-
-### 3. Enable the extension
-
-Add to your `php.ini`:
-
-```ini
-extension=curl_impersonate.so
-```
-
-### 4. Verify
-
-```bash
+echo "extension=curl_impersonate.so" | sudo tee /etc/php.d/40-curl_impersonate.ini
 php -m | grep curl_impersonate
 php -r "var_dump(curl_cffi_version());"
 ```

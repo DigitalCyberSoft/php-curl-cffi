@@ -35,6 +35,18 @@ tests/php-compat/*.log
 tests/php-compat/*.sh
 tests/php-compat/*.php
 
+# Test binaries
+tests/bin/
+
 # IDE
 .vscode/
 .idea/
+
+# TLS signatures
+tests/signatures/*.json
+
+# Build dependencies and artifacts
+curl-impersonate/
+static-libs/
+libcurl-impersonate*.a
+*.deb

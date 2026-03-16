@@ -25,7 +25,7 @@
 
 #include <curl/curl.h>
 
-#define PHP_CURL_IMPERSONATE_VERSION "0.1.0"
+#define PHP_CURL_IMPERSONATE_VERSION "0.2.0"
 
 extern zend_module_entry curl_impersonate_module_entry;
 #define phpext_curl_impersonate_ptr &curl_impersonate_module_entry
